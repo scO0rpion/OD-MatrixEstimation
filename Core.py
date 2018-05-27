@@ -1,6 +1,5 @@
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
-
 plt.style.use('ggplot')
 import networkx as nx
 import numpy as np
@@ -22,12 +21,19 @@ class CustomGraph(nx.DiGraph):
     memory!
     """
 
-    def __init__(self, m, n, only_shortest_paths=True):
+    def __init__(self, m, n, mode='grid shortest paths', add_incidence_matrix=True):
+        """
+        :param m: xGrid size
+        :param n: yGrid size
+        :param mode: one of 'only shortest paths' , 'grid shortest path' , 'all simple paths' strings !
+        :param add_incidence_matrix: whether to add incidence matrices in initialization or not .
+        """
         super(CustomGraph, self).__init__()
         self.name = "my_grid_graph"
         self.m = m
         self.n = n
-        self.only_shortest_path = only_shortest_paths
+        self.mode = mode
+        self.add_incidence_matrix = add_incidence_matrix
         self.__grid_construction(m, n)
         # Position Of Each Node
         xgrid, ygrid = np.meshgrid(np.linspace(0, 1, n), np.linspace(0, 1, m))
@@ -41,26 +47,31 @@ class CustomGraph(nx.DiGraph):
         self.__set_attributes()
 
         self.H = 0
-        self.A = 0
-        self.AtA = 0
+        self.A = np.array([0])
         self.A_tild = 0
         self.C_tild = 0
+        self.__x = np.array(0)
         self.C_tild_squared = []
-        self.nodes_dictionary = {}
-        self.edges_dictionary = {}
+        self.nodes_dictionary = nx.get_node_attributes(self, 'index')
+        self.edges_dictionary = nx.get_edge_attributes(self, 'index')
         self.path_dictionary = {}
         self.total_number_of_active_paths = []
         self.number_of_paths = {}
         self.number_of_edges = {}
-        self.pairs_distances = {}
+        self.path_gen_func = None
         self.mapping = None
-        self.__add_matrix()
+        # L_1 distance between nodes
+        p = OrderedDict(nx.all_pairs_shortest_path_length(self))
+        self.pairs_distances = {(first_node, second_node): 1 + p[first_node][second_node] for first_node in p
+                                for second_node in p[first_node]}
+
+        if self.add_incidence_matrix:
+            self.set_path_generator()
+            self.add_matrix()
+            # The Most Important Thing
+            self.__x = np.zeros((self.A.shape[1],))
 
         self.average_trip_cost = 0
-
-        # The Most Important Thing
-        self.__x = np.zeros((self.A.shape[1],))
-        self.x_predecessor = self.__x.copy()
 
         # Demand Creation
         self.Demand = None
@@ -106,13 +117,15 @@ class CustomGraph(nx.DiGraph):
         nx.set_edge_attributes(self, dict(zip(self.edges.keys(), range(len(self.edges.keys())))), 'index')
         nx.set_node_attributes(self, dict(zip(self.nodes.keys(), range(len(self.nodes.keys())))), 'index')
 
-    def __add_matrix(self):
+    def add_matrix(self):
         """
         Adding Incidence Matrices to class
         Consider that this method will automatically generate H matrix with rows are flattened indexes of OD matrix
+        total number of paths is dictionary containing total number of considering paths depending on the mode you're
+        running the code .
         """
-        edges_dictionary = nx.get_edge_attributes(self, 'index')
-        nodes_dictionary = nx.get_node_attributes(self, 'index')
+        edges_dictionary = self.edges_dictionary
+        nodes_dictionary = self.nodes_dictionary
 
         pairs = ((i, j) for i in self.nodes.keys() for j in self.nodes.keys())
         sorted_index = np.array([nodes_dictionary[first_node] * len(self.nodes) + nodes_dictionary[second_node]
@@ -134,17 +147,12 @@ class CustomGraph(nx.DiGraph):
         path_index = 0
         link_path_index = 0
 
-        # this will make l_1 distance between nodes
-        p = OrderedDict(nx.all_pairs_shortest_path_length(self))
-        pairwise_dist = {(first_node, second_node): 1 + p[first_node][second_node] for first_node in p
-                         for second_node in p[first_node]}
+        pairwise_dist = self.pairs_distances
 
         for pair in tqdm(pairs):
             if pair[0] != pair[1]:
-                if self.only_shortest_path:
-                    paths_generator[pair] = nx.all_shortest_paths(self, pair[0], pair[1])
-                else:
-                    paths_generator[pair] = nx.all_simple_paths(self, pair[0], pair[1])
+                # generates desired paths between source and target . returns a generator!
+                paths_generator[pair] = self.path_gen_func(self, pair[0], pair[1])
 
                 for path in paths_generator[pair]:
                     data.append(pairwise_dist[pair])
@@ -171,26 +179,35 @@ class CustomGraph(nx.DiGraph):
         self.H = sparse.csr_matrix((data, pair_path_indices, pair_path_indptr))[self.mapping, :]
         # the columns of this matrix have the same mapping of paths to index ,with H
         self.A = sparse.csc_matrix((np.ones((len(link_path_indices),)), link_path_indices, link_path_indptr))
-        self.AtA = self.A.T.dot(self.A)
         self.A_tild = sparse.csc_matrix((data_tild, link_path_indices, link_path_indptr))
         # this is the vector containing of d_ij * sqrt(n_ij)
         self.C_tild = np.array(C_tild)
         self.C_tild_squared = self.C_tild ** 2
-        self.nodes_dictionary = nodes_dictionary
-        self.edges_dictionary = edges_dictionary
         self.total_number_of_active_paths = self.H.shape[1]
         self.number_of_paths = number_of_paths
         self.number_of_edges = self.A.shape[0]
-        self.pairs_distances = pairwise_dist
         self.path_dictionary = paths_dict
+
+    def set_path_generator(self):
+
+        path_generators = {'only shortest paths': CustomGraph.efficient_paths,
+                           'all simple paths': nx.all_simple_paths,
+                           'grid shortest paths': nx.all_shortest_paths}
+        if self.mode not in path_generators:
+            raise NameError("mode must be one of {}".format(path_generators.keys()))
+        elif not self.isEquilibrium and self.mode == 'only shortest paths':
+            raise ValueError('when the user equilibrium solution hasn\'t yet be found you cant find shortest paths.'
+                             'try this after UESolver .')
+        else:
+            self.path_gen_func = path_generators[self.mode]
 
     def __generate_demand(self):
         # Hmmm !-------------------------
         np.random.seed(1)
         # -------------------------------
         node_dict = self.nodes_dictionary
-        attraction = 10 * np.random.rand(self.m * self.n, 1) + 0.3
-        demand = 10 * np.random.rand(1, self.m * self.n) + 0.3
+        attraction = 10 * np.sqrt(np.random.rand(self.m * self.n, 1))
+        demand = 10 * np.sqrt(np.random.rand(1, self.m * self.n))
         self.Demand = np.matmul(attraction, demand)
         self._real_delta = np.sqrt((attraction ** 2).sum() * (demand ** 2).sum())
 
@@ -200,18 +217,46 @@ class CustomGraph(nx.DiGraph):
                     self.Demand[node_dict[firstnode], node_dict[secondnode]] /= self.pairs_distances[
                         (firstnode, secondnode)]
 
+    @staticmethod
+    def efficient_paths(graph, source, target, cutofff=1.1):
+        """
+        this function will calculate all simple paths time cost and choose some of the best of them . depend on them
+        minimum time cost value others will be chosen . paths that they're length are shortest than 1.5 times shortest
+        path will be remained !
+        :param source: source in graph
+        :param target: target in graph
+        :param graph : CustomGraph obejct
+        :param cutofff : cutoff value for cutting time cost value
+        :return: it will return a dictionary of paths that have minimum Time Cost.
+        """
+
+        if not graph.has_node(source) or not graph.has_node(target):
+            raise ValueError("could not find node in graph nodes !")
+
+        weights = graph.get('weight')
+        paths_dict = {}
+        minimum_length = np.inf
+
+        for path in nx.all_simple_paths(graph, source, target):
+            paths_dict[tuple(path)] = sum([weights[link] for link in zip(path[:-1], path[1:])])
+            if minimum_length > paths_dict[tuple(path)]:
+                minimum_length = paths_dict[tuple(path)]
+
+        desired_paths = filter(lambda x: x[1] <= cutofff * minimum_length, paths_dict.items())
+
+        return zip(*desired_paths)[0]
+
     def plot(self, ax=None):
         p = nx.single_source_shortest_path_length(self, (0, 0))
 
         nx.draw_networkx_edges(self, self.pos, nodelist=[(0, 0)], alpha=0.8, edge_color='gray', ax=ax)
         nx.draw_networkx_nodes(self, self.pos, nodelist=p.keys(), node_color=p.values(),
-                               node_size=100, cmap=plt.cm.RdBu_r, ax=ax)
+                               node_size=140, cmap=plt.cm.winter, ax=ax)
         nx.draw_networkx_labels(self, self.pos, dict(zip(self.nodes.keys(), range(len(self.nodes)))),
                                 font_size=10)
         plt.axis('equal')
         plt.axis('off')
         # at the end you must put plt.show() yourself!
-
 
 # This is Unusable for now . because i've changed the mapping so no need for complicated reshaping !
 class reshape(AffAtom):
@@ -300,7 +345,7 @@ class UESolver(object):
         if self.__slowVersion:
             self.flow_on_routes = graph.x.copy()
         # Scope Instance
-        self.scope = Scope(10, 0.01, self.update, 10000)
+        self.scope = Scope(10, 0.01, self.update, 10000, self.close)
 
     def update(self, frame):
 
@@ -313,11 +358,13 @@ class UESolver(object):
         delayFuncs = self.graph.get('Delay Func')
         flows = OrderedDict(zip(self.graph.edges.keys(), np.zeros(len(delayFuncs))))
         path_dict = {}
-        if self.__slowVersion: path_dict = self.graph.path_dictionary
+        if self.__slowVersion:
+            path_dict = self.graph.path_dictionary
+            self.flow_on_routes *= (1 - Lambda)
 
         # Process
         paths = OrderedDict(nx.all_pairs_dijkstra_path(self.graph))
-        self.flow_on_routes *= (1 - Lambda)
+
 
         for firstnode in paths:
             for secondnode in paths[firstnode]:
@@ -372,25 +419,42 @@ class UESolver(object):
                             for first_node in self.graph.nodes.keys()
                             for second_node in self.graph.nodes.keys()
                             if not first_node == second_node])
-        mdict = {'A': self.graph.A, 'H': self.graph.H, 'x_true': self.flow_on_routes, 'demand': self.graph.Demand,
-                 'mapping': mapping}
+        mdict = {'A': self.graph.A, 'H': self.graph.H, 'demand': self.graph.Demand}
+        if hasattr(self, 'flow_on_routes'):
+            mdict['flow_on_routes'] = self.flow_on_routes
 
         io.savemat('UE_checkpoint', mdict, oned_as='column', format='4')
+
+    def close(self, *args):
+        """input should be an event handle of closing the figure """
+        # Equilibrium reached
+        self.graph.isEquilibrium = True
+
+        if not self.graph.add_incidence_matrix:
+            # if initialization was incomplete before
+            self.graph.set_path_generator()
+            self.graph.add_matrix()
+            # The Most Important Thing
+            self.graph.x = np.zeros((self.graph.A.shape[1],))
 
 
 class Scope(object):
 
-    def __init__(self, maxt, dt, updateFcn, nIteration):
+    def __init__(self, maxt, dt, updateFcn, nIteration, close_fcn):
         """
         This Class is responsible to draw live animation
+        :type close_fcn: function
         :type updateFcn: callable function for update . this function should return a scalar value and
         should only take on frame argument
         :param ax: Axis object
         :param maxt: Maximum Time Span To show In PLot
         :param dt: Delta t
         :param nIteration : number of iterations
+        :param close_fcn : a function that will be called at closing the figure
         """
         self.__fig, self.ax = plt.subplots()
+        assert callable(close_fcn)
+        self.__fig.canvas.mpl_connect('close_event', close_fcn)
         plt.subplots_adjust(bottom=0.25)
         self.ax.relim()
         self.ax.autoscale_view(True, False, True)
@@ -413,7 +477,7 @@ class Scope(object):
 
         # animation Fucntion
         self.IterLimit = nIteration
-        self.__anim = animation.FuncAnimation(self.__fig, self.update, frames=nIteration, blit=True, interval=100,
+        self.__anim = animation.FuncAnimation(self.__fig, self.update, frames=nIteration, blit=True, interval=50,
                                               repeat=False)
 
         # Start Plotting
@@ -462,3 +526,4 @@ class Scope(object):
     def __del__(self):
         plt.close(self.__fig)
         del self
+
