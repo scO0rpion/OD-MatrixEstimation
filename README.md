@@ -11,7 +11,7 @@ There is an annual questionairre where every household should fill out which ent
 
 The algorithm was tested on a synthesis dataset where the assumptions were met. 
 
-[results](results.png)!
+![results](results.png)
 
 ## Method
 First we generated a rank one origin destination demand matrix and then affect the matrix with a distance matrix. We 
