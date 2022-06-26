@@ -1,5 +1,5 @@
 # OD-MatrixEstimation
-This is a repository containing my undergrad thesis project regarding origin destination matrices estimation using convex optimization and sparse reconstruction techniques. There is a brief presentation available [here](Slides%202.pdf)
+This is a repository containing my undergrad thesis project regarding origin destination matrices estimation using convex optimization and sparse reconstruction techniques. There is a brief presentation available [here](Slides%202.pdf).
 File 'Test.ipynb' contains a synthetis simulation.  
 
 ## Introduction
